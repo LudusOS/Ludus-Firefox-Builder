@@ -1,0 +1,252 @@
+name: Build and Release Firefox DEB
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * *'
+
+permissions:
+  contents: write 
+
+jobs:
+  build:
+    # Debian 13 container
+    runs-on: ubuntu-latest
+    container:
+      image: debian:13
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y curl wget sed tar xz-utils dpkg-dev git
+
+      # 1. Checkout the repository to access the version file
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Get the latest Firefox version number and final download URL
+      - name: Get latest Firefox version info
+        id: get_version
+        run: |
+          BOUNCER_URL="https://download.mozilla.org/?product=firefox-latest&os=linux64&lang=en-US"
+          echo "Resolving final URL from bouncer: $BOUNCER_URL"
+          EFFECTIVE_URL=$(curl -w '%{url_effective}' -L -s -o /dev/null "$BOUNCER_URL")
+          echo "Final download URL: $EFFECTIVE_URL"
+          LATEST_VERSION=$(echo "$EFFECTIVE_URL" | sed -n 's/.*firefox-\(.*\)\.tar.*/\1/p')
+          if [ -z "$LATEST_VERSION" ]; then
+            echo "::error::Could not extract version number from URL."
+            exit 1
+          fi
+          echo "Latest Firefox version is: $LATEST_VERSION"
+          echo "version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+          echo "url=$EFFECTIVE_URL" >> $GITHUB_OUTPUT
+
+      # 3. Compare the latest version with the one already built
+      - name: Check if version is new
+        id: check_version
+        run: |
+          CURRENT_VERSION=$(cat LATEST_VERSION.txt || echo "0.0")
+          echo "Last compiled version was: $CURRENT_VERSION"
+          if [ "${{ steps.get_version.outputs.version }}" = "$CURRENT_VERSION" ]; then
+            echo "Firefox is up to date. No new build needed."
+            echo "new_version=false" >> $GITHUB_OUTPUT
+          else
+            echo "New Firefox version found. Proceeding with build."
+            echo "new_version=true" >> $GITHUB_OUTPUT
+          fi
+
+      # 4. Download and extract the Firefox tarball
+      - name: Download and extract Firefox
+        if: steps.check_version.outputs.new_version == 'true'
+        run: |
+          echo "Downloading from ${{ steps.get_version.outputs.url }}"
+          wget -O firefox-latest.tar.archive "${{ steps.get_version.outputs.url }}"
+          tar xf firefox-latest.tar.archive
+
+      # 5. Create the .deb package structure
+      - name: Create DEB package structure
+        if: steps.check_version.outputs.new_version == 'true'
+        run: |
+          FF_VERSION=${{ steps.get_version.outputs.version }}
+          DEB_DIR="firefox-deb"
+          
+          # Create all necessary directories for the package
+          mkdir -p "${DEB_DIR}/DEBIAN"
+          mkdir -p "${DEB_DIR}/usr/lib"
+          mkdir -p "${DEB_DIR}/usr/share/applications"
+          mkdir -p "${DEB_DIR}/usr/share/pixmaps"
+          mkdir -p "${DEB_DIR}/usr/bin"
+
+          # Move Firefox files and create symlink to match the .desktop Exec path
+          mv firefox "${DEB_DIR}/usr/lib/"
+          ln -s /usr/lib/firefox/firefox "${DEB_DIR}/usr/bin/firefox"
+
+          # Copy the application icon
+          cp "${DEB_DIR}/usr/lib/firefox/browser/chrome/icons/default/default128.png" "${DEB_DIR}/usr/share/pixmaps/firefox.png"
+
+          # Create the control file with the new package name and corrected dependencies for Debian
+          cat <<EOF > "${DEB_DIR}/DEBIAN/control"
+          Package: firefox-ludus
+          Version: ${FF_VERSION}
+          Architecture: amd64
+          Maintainer: GitHub Action <actions@github.com>
+          Description: Latest stable version of Mozilla Firefox for amd64.
+           This package is automatically built from the official tarball for Debian.
+          Depends: libatk1.0-0, libc6, libcairo2, libdbus-1-3, libdbus-glib-1-2, libfontconfig1, libfreetype6, libgcc-s1, libgdk-pixbuf-2.0-0, libglib2.0-0, libgtk-3-0, libpango-1.0-0, libpangocairo-1.0-0, libstdc++6, libx11-6, libx11-xcb1, libxcb1, libxcomposite1, libxdamage1, libxext6, libxfixes3, libxrandr2, libxt6
+          EOF
+
+          # Create the complete, multilingual .desktop file
+          # Using 'EOF' prevents shell expansion of variables inside the block
+          cat <<'EOF' > "${DEB_DIR}/usr/share/applications/firefox.desktop"
+          [Desktop Entry]
+          Name=Firefox
+          Name[bg]=Firefox
+          Name[ca]=Firefox
+          Name[cs]=Firefox
+          Name[de]=Firefox
+          Name[el]=Firefox
+          Name[es]=Firefox
+          Name[fa]=Firefox
+          Name[fi]=Firefox
+          Name[fr]=Firefox
+          Name[hu]=Firefox
+          Name[it]=Firefox
+          Name[ja]=Firefox
+          Name[ko]=Firefox
+          Name[nb]=Firefox
+          Name[nl]=Firefox
+          Name[nn]=Firefox
+          Name[no]=Firefox
+          Name[pl]=Firefox
+          Name[pt]=Firefox
+          Name[pt_BR]=Firefox
+          Name[ru]=Firefox
+          Name[sk]=Firefox
+          Name[sv]=Firefox
+          Comment=Browse the World Wide Web
+          Comment[bg]=Сърфиране в Мрежата
+          Comment[ca]=Navegueu per el web
+          Comment[cs]=Prohlížení stránek World Wide Webu
+          Comment[de]=Im Internet surfen
+          Comment[el]=Περιηγηθείτε στον παγκόσμιο ιστό
+          Comment[es]=Navegue por la web
+          Comment[fa]=صفحات شبکه جهانی اینترنت را مرور نمایید
+          Comment[fi]=Selaa Internetin WWW-sivuja
+          Comment[fr]=Navigue sur Internet
+          Comment[hu]=A világháló böngészése
+          Comment[it]=Esplora il web
+          Comment[ja]=ウェブを閲覧します
+          Comment[ko]=웹을 돌아 다닙니다
+          Comment[nb]=Surf på nettet
+          Comment[nl]=Verken het internet
+          Comment[nn]=Surf på nettet
+          Comment[no]=Surf på nettet
+          Comment[pl]=Przeglądanie stron WWW
+          Comment[pt]=Navegue na Internet
+          Comment[pt_BR]=Navegue na Internet
+          Comment[ru]=Обозреватель Всемирной Паутины
+          Comment[sk]=Prehliadanie internetu
+          Comment[sv]=Surfa på webben
+          GenericName=Web Browser
+          GenericName[bg]=Интернет браузър
+          GenericName[ca]=Navegador web
+          GenericName[cs]=Webový prohlížeč
+          GenericName[de]=Webbrowser
+          GenericName[el]=Περιηγητής ιστού
+          GenericName[es]=Navegador web
+          GenericName[fa]=مرورگر اینترنتی
+          GenericName[fi]=WWW-selain
+          GenericName[fr]=Navigateur Web
+          GenericName[hu]=Webböngésző
+          GenericName[it]=Browser Web
+          GenericName[ja]=ウェブ・ブラウザ
+          GenericName[ko]=웹 브라우저
+          GenericName[nb]=Nettleser
+          GenericName[nl]=Webbrowser
+          GenericName[nn]=Nettlesar
+          GenericName[no]=Nettleser
+          GenericName[pl]=Przeglądarka WWW
+          GenericName[pt]=Navegador Web
+          GenericName[pt_BR]=Navegador Web
+          GenericName[ru]=Интернет-браузер
+          GenericName[sk]=Internetový prehliadač
+          GenericName[sv]=Webbläsare
+          X-GNOME-FullName=Firefox Web Browser
+          X-GNOME-FullName[bg]=Интернет браузър (Firefox)
+          X-GNOME-FullName[ca]=Navegador web Firefox
+          X-GNOME-FullName[cs]=Firefox Webový prohlížeč
+          X-GNOME-FullName[el]=Περιηγήτης Ιστού Firefox
+          X-GNOME-FullName[es]=Navegador web Firefox
+          X-GNOME-FullName[fa]=مرورگر اینترنتی Firefox
+          X-GNOME-FullName[fi]=Firefox-selain
+          X-GNOME-FullName[fr]=Navigateur Web Firefox
+          X-GNOME-FullName[hu]=Firefox webböngésző
+          X-GNOME-FullName[it]=Firefox Browser Web
+          X-GNOME-FullName[ja]=Firefox ウェブ・ブラウザ
+          X-GNOME-FullName[ko]=Firefox 웹 브라우저
+          X-GNOME-FullName[nb]=Firefox Nettleser
+          X-GNOME-FullName[nl]=Firefox webbrowser
+          X-GNOME-FullName[nn]=Firefox Nettlesar
+          X-GNOME-FullName[no]=Firefox Nettleser
+          X-GNOME-FullName[pl]=Przeglądarka WWW Firefox
+          X-GNOME-FullName[pt]=Firefox Navegador Web
+          X-GNOME-FullName[pt_BR]=Navegador Web Firefox
+          X-GNOME-FullName[ru]=Интернет-браузер Firefox
+          X-GNOME-FullName[sk]=Internetový prehliadač Firefox
+          X-GNOME-FullName[sv]=Webbläsaren Firefox
+          Exec=/usr/bin/firefox %u
+          Terminal=false
+          X-MultipleArgs=false
+          Type=Application
+          Icon=firefox
+          Categories=Network;WebBrowser;
+          MimeType=text/html;text/xml;application/xhtml+xml;application/xml;application/vnd.mozilla.xul+xml;application/rss+xml;application/rdf+xml;image/gif;image/jpeg;image/png;x-scheme-handler/http;x-scheme-handler/https;
+          StartupWMClass=firefox
+          StartupNotify=true
+          EOF
+
+      # 6. Build the .deb package
+      - name: Build DEB package
+        if: steps.check_version.outputs.new_version == 'true'
+        id: build_deb
+        run: |
+          FF_VERSION=${{ steps.get_version.outputs.version }}
+          # Update filename to match the new package name
+          DEB_FILENAME="firefox-ludus_${FF_VERSION}_amd64.deb"
+          # Install dpkg-deb which is not in the base debian image
+          apt-get install -y dpkg-dev
+          dpkg-deb --build firefox-deb
+          mv firefox-deb.deb "${DEB_FILENAME}"
+          echo "DEB package created: ${DEB_FILENAME}"
+          echo "deb_name=${DEB_FILENAME}" >> $GITHUB_OUTPUT
+
+      # 7. Create and publish the GitHub Release
+      - name: Create GitHub Release
+        if: steps.check_version.outputs.new_version == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.build_deb.outputs.deb_name }}
+          tag_name: v${{ steps.get_version.outputs.version }}
+          name: Firefox ${{ steps.get_version.outputs.version }} (ludus)
+          body: |
+            Automated release of Firefox for Debian (amd64).
+            Package: `${{ steps.build_deb.outputs.deb_name }}`
+
+      # 8. Update the version file in the repository
+      - name: Update version file in repository
+        if: steps.check_version.outputs.new_version == 'true'
+        run: |
+          # Add the repository directory as a safe directory for Git
+          git config --global --add safe.directory ${GITHUB_WORKSPACE}
+          
+          FF_VERSION=${{ steps.get_version.outputs.version }}
+          echo "${FF_VERSION}" > LATEST_VERSION.txt
+          
+          # Install git to commit the file (already installed, but safe to keep)
+          apt-get install -y git
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add LATEST_VERSION.txt
+          git commit -m "build: Update latest Firefox version to ${FF_VERSION}"
+          git push
